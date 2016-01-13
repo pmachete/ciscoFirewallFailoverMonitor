@@ -1,0 +1,256 @@
+#!/usr/bin/expect 
+
+# Script done by Pedro Machete (pmachete@gmail.com)
+# Use it at you own risk ... actually it only runs snmp queries to your firewall, but you never know! :)
+# Developed in 2008.
+
+set webdir "/var/www/html/failover/historylocation/"
+set rootdir "/opt/myscriptdir"
+set myConfigFile "${rootdir}/listOfCiscoFirewalls.txt" 
+set resultfile "myResultCheckFail.txt"
+set fileNameFWSMHistory "fwsw_failover_history.txt"
+set fileNameFWSMEvents "fwsw_failover_events.txt" 
+
+
+
+
+# myConfigFile file format:
+# ASA1;10.1.1.1
+# FWSM1;10.1.1.2
+# ...
+
+set SEC_ACTIVE "SEC_ACTIVE"
+
+proc getHostname {ip} {
+    set hostname "UNKNWON (SNMP not configured)"
+    catch {
+      set hostnamedump [exec snmpwalk -v 1 -c dsws3g! $ip iso.3.6.1.2.1.1.5] 
+      set dumplist [split $hostnamedump "\r"]
+      foreach element $dumplist {
+         # Hostname
+         if {[regexp { = STRING: ([\"()A-Za-z0-9\-]*)} $element - hostname]} {
+                puts "FOUND result: $hostname"
+         }
+      }
+    } error
+    return $hostname
+}
+
+proc getMIB {ip mib} {
+   set var "UNKNWON (SNMP not configured)"
+   catch {
+      set vardump [exec snmpwalk -v 1 -c dsws3g! $ip $mib]
+      set dumplist [split $vardump "\r"]
+      foreach element $dumplist {
+         if {[regexp { = STRING: ([\"()A-Za-z0-9\-\ ]*)} $element - var]} {
+                puts "FOUND result: $var"
+         }
+      }
+   } error
+   return $var
+}
+
+proc getFailoverStatus {text} {
+    if {[regexp {(.*):([0-9]*)} $text - var1 var2]} {
+        if {$var2 == "0"} {
+           return "NORMAL (Primary is active)" 
+        } elseif {$var2 == "1"} {
+           return "NORMAL (Secondary is active)" 
+        } else {
+           return "FAILED ($var2)" 
+        }
+    }
+}
+
+set hostname ""
+
+# open the file for reading
+set fileIps [open "${myConfigFile}" r]
+# read entire file into a variabl
+set contents_of_file [read $fileIps] 
+close $fileIps
+
+# split the contents on newlines
+set list_of_lines [split $contents_of_file "\n"]
+
+set time [exec date]
+	
+set listOfTouchedSwitches {}        
+set listOfPortTypes {}
+set sendMail 0
+set varhistory "$time"
+
+set result ""
+foreach Machine $list_of_lines {
+       		if {([regexp {\#|\!} $Machine]) || ($Machine == "")} {
+	           continue
+        	}
+         
+        	if {[regexp {([A-Za-z0-9\-\_]*);([0-9]*\.[0-9]*\.[0-9]*\.[0-9]*)} $Machine - nome1 ip1 ]} {
+                   puts "nome1: $nome1" 	
+                   puts "ip1: $ip1"
+                   set Machine $ip1
+		} else {
+		   continue
+		}
+                set isFailoverOk 0 
+       		# Check if is repeated
+	        if {[lsearch -exact $listOfTouchedSwitches $Machine] != -1} {
+       		       puts "repeated: $Machine"
+       		       continue
+	        }
+       		lappend listOfTouchedSwitches $Machine
+
+	        # GET HOSTNAME
+                set myHostname ""
+                set myHostname [getHostname $Machine] 
+                set status "0"
+                
+		if ![regexp "UNKNWON" $myHostname] {
+                       # enterprises.9.9.147.1.2.1.1.1.2.6 --> "Primary unit (this device)"
+                       # enterprises.9.9.147.1.2.1.1.1.2.7 --> "Secondary unit"
+                       # enterprises.9.9.147.1.2.1.1.1.4.6 --> "Active unit" 
+                       # enterprises.9.9.147.1.2.1.1.1.4.7 --> "Standby unit" 
+                       set thisUnit     [getMIB $Machine enterprises.9.9.147.1.2.1.1.1.2.6]
+                       set otherUnit    [getMIB $Machine enterprises.9.9.147.1.2.1.1.1.2.7]
+                       set thisStatus   [getMIB $Machine enterprises.9.9.147.1.2.1.1.1.4.6]
+                       set otherStatus [getMIB $Machine enterprises.9.9.147.1.2.1.1.1.4.7]
+                  
+                       puts "thisUnit: $thisUnit"
+                       puts "otherUnit: $otherUnit"
+                       puts "thisStatus: $thisStatus"
+                       puts "otherStatus: $otherStatus"
+  
+                       if {([regexp "Primary unit" $thisUnit] && [regexp "Secondary unit" $otherUnit]) || ([regexp "Secondary unit" $thisUnit] && [regexp "Primary unit" $otherUnit])} {
+                          puts "IF 1"
+                          if {([regexp "Active unit" $thisStatus] && [regexp "Standby unit" $otherStatus]) || ([regexp "Standby unit" $thisStatus] && [regexp "Active unit" $otherStatus])} {
+                              set isFailoverOk 1 
+                              puts "IF 2"
+                              if {[regexp "Primary unit" $thisUnit] && [regexp "this device" $thisUnit] && [regexp "Active unit" $thisStatus]} {
+                                 set status "normal"
+                              } elseif {[regexp "Secondary unit" $otherUnit] && [regexp "this device" $otherUnit] && [regexp "Active unit" $otherStatus]} {
+                                 set status $SEC_ACTIVE
+                              } else {
+                                 set status "Problem"
+                                 set isFailoverOk 0
+                              }
+                          } else {
+                              set isFailoverOk 0
+                          }
+                       } else {
+                          set isFailoverOk 0
+                       }   
+                        
+                       puts "Status: $status"
+                       puts "isFailoverOk: $isFailoverOk"		
+                 
+                       if {!$isFailoverOk} {
+                              set varhistory "$varhistory;$myHostname:3"
+                       } elseif {$status == "Problem"} {
+                              set varhistory "$varhistory;$myHostname:3"
+
+                              #set varhistory "$varhistory;3"
+                       } elseif {$status == $SEC_ACTIVE } {
+                              set varhistory "$varhistory;$myHostname:1"
+                       } else {
+                              set varhistory "$varhistory;$myHostname:0"
+                       }
+
+                       if {!$isFailoverOk} {
+                          append result "  NOK -$myHostname:$ip1: (FAILED!) \[$status\] <<--\n" 
+                          #set sendMail 1
+                       } else {
+                          append result "  OK  -$myHostname:$ip1: $status \n"
+                       }
+                 }
+}
+puts "End cycle: -------------------------------"
+
+set fileResultFind [open "${webdir}${resultfile}" w]
+puts $fileResultFind "Content-Transfer-Encoding: 7bit"
+puts $fileResultFind "MIME-Version: 1.0"
+puts $fileResultFind "Date: $time"
+puts $fileResultFind "From: myemail@server.com (CISCO FIREWALL MONITOR)"
+puts $fileResultFind "To: myemail@server.com"
+puts $fileResultFind "Subject: FWSM Failover CHANGES!!!"
+puts $fileResultFind "X-Mailer: MIME::Lite 2.106  (B2.11; Q2.03)"
+puts $fileResultFind "FWSM/ASA/PIX Failover Monitoring: $time\n"
+
+puts $fileResultFind "Current status:"
+
+puts $fileResultFind "$result"
+
+puts $fileResultFind ""
+puts $fileResultFind "Changes:"
+set fileFWSMHistory [open "${webdir}${historyFile}" r]
+set contents_of_file [read $fileFWSMHistory]
+set list_of_lines [split $contents_of_file "\n"]
+set lastline ""
+foreach aline $list_of_lines {
+   if {($aline != "") && [regexp ";" $aline]} {
+      set lastline $aline
+   }
+}
+puts "last line: $lastline"
+close $fileFWSMHistory
+
+set fileFWSMEvents [open "${webdir}${fileNameFWSMEvents}" a]
+
+set splitlist [split $varhistory ";"]
+set flag -1
+foreach element $splitlist {
+   incr flag 
+   if {$flag < 1} {continue}
+   set var1 "NN"
+   if {[regexp {(.*):([0-9]*)} $element - var1 var2]} {
+      puts "found var1: $var1"  
+   }
+   # Find lastline
+   if {[regexp "$element" $lastline]} {
+        puts "FOUND element: $element"
+        set fwstatus [getFailoverStatus $element]
+        #puts $fileResultFind "Status is the same: $fwstatus ($element)"
+   } else {
+        # Verificar se nao respondeu ou se mudou de estado realmente
+        if {![regexp "$var1" $lastline]} {
+            # Afinal, simplesmente, parou de responder
+            puts $fileResultFind  "  Status changed: $var1 is unreachable. Could be a problem with the connectivity .. assuming that is not a problem <<---------------------"
+
+        } else {
+            # Status changed
+            set fwstatus [getFailoverStatus $element]
+            puts "NOT FOUND element: $element"
+            set var2b "??"
+            set var_str ""
+            if {[regexp "${var1}:\(\[0-9\]*\)" $lastline - var2b] } {
+               puts "Found previous status: $var2b"
+            } else {
+               puts "Did not Found previous:"
+            }
+            set var2b_text  [getFailoverStatus "$var1:$var2b"]
+ 
+            puts $fileResultFind  "  Status changed from $var2b_text ($var1:$var2b) -> $fwstatus on $element <<---------------------------"
+            puts $fileFWSMEvents "  $time: Status changed from $var2b_text -> $fwstatus on $element"
+            set sendMail 1
+        }
+   }
+}
+
+close $fileFWSMEvents
+
+if {$varhistory != ""} {
+   set fileHistory [open "${webdir}${fileNameFWSMHistory}" a]
+   puts $fileHistory "$varhistory"
+   close $fileHistory
+}  
+
+foreach aPortType $listOfPortTypes {
+   puts "type: $aPortType"
+} 
+
+close $fileResultFind
+if {$sendMail} {
+   puts "gonna send mail!"
+   exec cat ${webdir}${fileNameFWSMHistory} | /usr/sbin/sendmail myemail@server.com &
+}
+
