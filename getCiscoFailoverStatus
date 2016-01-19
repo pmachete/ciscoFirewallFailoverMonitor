@@ -24,7 +24,7 @@ set SEC_ACTIVE "SEC_ACTIVE"
 proc getHostname {ip} {
     set hostname "UNKNWON (SNMP not configured)"
     catch {
-      set hostnamedump [exec snmpwalk -v 1 -c dsws3g! $ip iso.3.6.1.2.1.1.5] 
+      set hostnamedump [exec snmpwalk -v 1 -c public $ip iso.3.6.1.2.1.1.5] 
       set dumplist [split $hostnamedump "\r"]
       foreach element $dumplist {
          # Hostname
@@ -39,7 +39,7 @@ proc getHostname {ip} {
 proc getMIB {ip mib} {
    set var "UNKNWON (SNMP not configured)"
    catch {
-      set vardump [exec snmpwalk -v 1 -c dsws3g! $ip $mib]
+      set vardump [exec snmpwalk -v 1 -c public $ip $mib]
       set dumplist [split $vardump "\r"]
       foreach element $dumplist {
          if {[regexp { = STRING: ([\"()A-Za-z0-9\-\ ]*)} $element - var]} {
